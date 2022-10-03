@@ -5,8 +5,35 @@ import { EventEmitter } from "events";
 // 14 reaches its end-of-life, this can be removed.
 import { AbortController as PolyfillAbortController } from "node-abort-controller";
 
-import { Redis as IORedisClient, Cluster as IORedisCluster } from "ioredis";
-type Client = IORedisClient | IORedisCluster;
+import { Redis as IORedisClient } from "ioredis";
+import { RedisClientType } from "redis";
+
+interface BaseClient {
+  quit: () => unknown;
+}
+
+interface IORedisClientType extends BaseClient {
+  evalsha: IORedisClient["evalsha"];
+  eval: IORedisClient["eval"];
+}
+
+interface NodeRedisClientType extends BaseClient {
+  evalSha: RedisClientType["evalSha"];
+  eval: RedisClientType["eval"];
+}
+
+type Client = IORedisClientType | NodeRedisClientType;
+
+function isNodeRedisClientType(a: unknown): a is NodeRedisClientType {
+  if (typeof a === "object" && a !== null) {
+    if ("evalSha" in a && !("evalsha" in a)) {
+      if (typeof (a as { evalSha: unknown })["evalSha"] === "function") {
+        return true;
+      }
+    }
+  }
+  return false;
+}
 
 // Define script constants.
 const ACQUIRE_SCRIPT = `
@@ -552,12 +579,20 @@ export default class Redlock extends EventEmitter {
       let result: number;
       try {
         // Attempt to evaluate the script by its hash.
-        const shaResult = (await client.evalsha(
-          script.hash,
-          keys.length,
-          ...keys,
-          ...args
-        )) as unknown;
+        let shaResult: unknown;
+        if (isNodeRedisClientType(client)) {
+          shaResult = await client.evalSha(script.hash, {
+            keys,
+            arguments: args.map((i) => i.toString()),
+          });
+        } else {
+          shaResult = await client.evalsha(
+            script.hash,
+            keys.length,
+            ...keys,
+            ...args
+          );
+        }
 
         if (typeof shaResult !== "number") {
           throw new Error(
@@ -567,6 +602,7 @@ export default class Redlock extends EventEmitter {
 
         result = shaResult;
       } catch (error) {
+        let rawResult: unknown;
         // If the redis server does not already have the script cached,
         // reattempt the request with the script's raw text.
         if (
@@ -575,12 +611,19 @@ export default class Redlock extends EventEmitter {
         ) {
           throw error;
         }
-        const rawResult = (await client.eval(
-          script.value,
-          keys.length,
-          ...keys,
-          ...args
-        )) as unknown;
+        if (isNodeRedisClientType(client)) {
+          rawResult = await client.eval(script.value, {
+            arguments: args.map((i) => i.toString()),
+            keys,
+          });
+        } else {
+          rawResult = await client.eval(
+            script.value,
+            keys.length,
+            ...keys,
+            ...args
+          );
+        }
 
         if (typeof rawResult !== "number") {
           throw new Error(
