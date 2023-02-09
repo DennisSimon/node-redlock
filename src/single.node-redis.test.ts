@@ -134,7 +134,7 @@ function run(
 
         for (const slot of slots) {
           // console.log(`deleting slot ${i}`);
-          await redis.getSlotMaster(slot).client.flushAll();
+          await (await redis.slots[slot].master.client)?.flushAll()
         }
       } catch (e) {
         console.log({ e });
